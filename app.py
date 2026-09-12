@@ -5,10 +5,11 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 import core
 
-st.set_page_config(page_title="Tabbycat Static Archiver", layout="centered")
+st.set_page_config(page_title="Tabbycat Static Archiver", page_icon="🗂️", layout="centered")
 
 st.title("Tabbycat Static Archiver")
 st.caption(
@@ -43,10 +44,18 @@ with st.form("archive_form"):
     submitted = st.form_submit_button("Start archiving", type="primary")
 
 log_box = st.empty()
+scroll_anchor = st.empty()
 status_box = st.empty()
 
 if "log_lines" not in st.session_state:
     st.session_state.log_lines = []
+
+# Scrolls the main page down whenever a new log line comes in, so the log
+# stays in view without the user needing to scroll manually.
+SCROLL_SCRIPT = """<script>
+var mainSection = window.parent.document.querySelector('section.main');
+if (mainSection) { mainSection.scrollTop = mainSection.scrollHeight; }
+</script>"""
 
 if submitted:
     if not base_url_input.strip() or not slug.strip():
@@ -57,13 +66,15 @@ if submitted:
         def log(msg: str):
             st.session_state.log_lines.append(msg)
             log_box.code("\n".join(st.session_state.log_lines[-400:]), language=None)
+            with scroll_anchor:
+                components.html(SCROLL_SCRIPT, height=0)
 
         base_url = core.normalize_base_url(base_url_input)
         run_id = uuid.uuid4().hex[:8]
         work_dir = Path(tempfile.gettempdir()) / f"tabby_export_{run_id}"
         zip_base_path = str(Path(tempfile.gettempdir()) / f"tabby_export_{run_id}")
 
-        status_box.info("Archiving in progress — this can take a few minutes for larger tournaments...")
+        status_box.info("Archiving in progress, this can take a few minutes for larger tournaments...")
 
         try:
             zip_path = asyncio.run(
@@ -84,27 +95,6 @@ if submitted:
                     file_name=f"{slug}_archive.zip",
                     mime="application/zip",
                 )
-                
-            with st.expander("🌐 Deploy this on Vercel (optional)"):
-                st.markdown(
-                    "Vercel can host this archive as a static site under its own "
-                    "free subdomain. This just opens Vercel's upload page. You'll "
-                    "sign in and upload the zip yourself there."
-                )
-                st.link_button("Deploy this on Vercel →", "https://vercel.com/new")
-                st.markdown(
-                    "1. Sign in to Vercel (or create a free account).\n"
-                    "2. On the **New Project** page, either drag and drop the "
-                    f"**`{slug}_archive.zip`** file you just downloaded onto the "
-                    "page, or click the **file** link (next to \"or a folder\") "
-                    "and select it from your downloads — either way works, no "
-                    "need to unzip it first.\n"
-                    "3. Vercel will suggest a project name. This becomes your "
-                    "`your-name.vercel.app` subdomain, so edit it to whatever you "
-                    "want before deploying.\n"
-                    "4. Click **Deploy**. It's live in under a minute."
-                )
-                
         except Exception as e:
             status_box.error(f"Archiving failed: {e}")
         finally:
@@ -114,6 +104,27 @@ if submitted:
 
 st.divider()
 st.caption(
-    "Note: Download button will disappear after clicking it once."
+    "Note: Download button will disappear after clicking it once. "
     "Rerun the worker to generate the file again."
 )
+
+# Sits outside the archiving flow on purpose, so it stays visible regardless
+# of whether an archive was just generated in this session or not.
+with st.expander("🌐 Deploy an archive on Vercel (optional)"):
+    st.markdown(
+        "Vercel can host a downloaded archive as a static site under its own "
+        "free subdomain. This just opens Vercel's upload page. You'll sign in "
+        "and upload the zip yourself there."
+    )
+    st.link_button("Deploy on Vercel →", "https://vercel.com/new")
+    st.markdown(
+        "1. Sign in to Vercel (or create a free account).\n"
+        "2. On the **New Project** page, either drag and drop the archive "
+        "zip file you downloaded onto the page, or click the **file** link "
+        "(next to \"or a folder\") and select it from your downloads, "
+        "either way works, no need to unzip it first.\n"
+        "3. Vercel will suggest a project name. This becomes your "
+        "`your-name.vercel.app` subdomain, so edit it to whatever you "
+        "want before deploying.\n"
+        "4. Click **Deploy**. It's live in under a minute."
+    )
