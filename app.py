@@ -8,21 +8,20 @@ import streamlit as st
 
 import core
 
-st.set_page_config(page_title="Tabbycat Static Archiver", page_icon="🗂️", layout="centered")
+st.set_page_config(page_title="Tabbycat Static Archiver", layout="centered")
 
-st.title("🗂️ Tabbycat Static Archiver")
+st.title("Tabbycat Static Archiver")
 st.caption(
     "Strips everything public on a Tabbycat tournament site (results, tab pages, "
-    "participants, motions, etc.) into flat static HTML and zips it up — no login, "
-    "no env vars, everything here is public data."
+    "participants, motions, etc.) into flat static HTML and zips it up."
 )
 
 with st.form("archive_form"):
     base_url_input = st.text_input(
         "Tournament base URL",
         placeholder="https://razm24.calicotab.com",
-        help="With or without a trailing slash — either works. This is the site's "
-             "domain, not including the tournament slug.",
+        help="With or without a trailing slash, either works. This is the site's "
+             "domain, do not include the tournament slug.",
     )
     slug = st.text_input(
         "Slug",
@@ -37,11 +36,8 @@ with st.form("archive_form"):
         step=1,
         help=(
             "The archiver tries to fetch a results page for every round from 1 up to "
-            "this number. 20 is the default because it comfortably covers every "
-            "tournament we've seen (prelims + outrounds). Rounds beyond what a "
-            "tournament actually has just fail gracefully and are skipped — so it's "
-            "safe to leave this higher than needed. Only raise it if a tournament "
-            "genuinely has more than 20 rounds."
+            "this number. Only raise it if a tournament "
+            "genuinely has more than 20 rounds. Else leave it at 20"
         ),
     )
     submitted = st.form_submit_button("Start archiving", type="primary")
@@ -88,6 +84,27 @@ if submitted:
                     file_name=f"{slug}_archive.zip",
                     mime="application/zip",
                 )
+                
+            with st.expander("🌐 Deploy this on Vercel (optional)"):
+                st.markdown(
+                    "Vercel can host this archive as a static site under its own "
+                    "free subdomain. This just opens Vercel's upload page. You'll "
+                    "sign in and upload the zip yourself there."
+                )
+                st.link_button("Deploy this on Vercel →", "https://vercel.com/new")
+                st.markdown(
+                    "1. Sign in to Vercel (or create a free account).\n"
+                    "2. On the **New Project** page, either drag and drop the "
+                    f"**`{slug}_archive.zip`** file you just downloaded onto the "
+                    "page, or click the **file** link (next to \"or a folder\") "
+                    "and select it from your downloads — either way works, no "
+                    "need to unzip it first.\n"
+                    "3. Vercel will suggest a project name. This becomes your "
+                    "`your-name.vercel.app` subdomain, so edit it to whatever you "
+                    "want before deploying.\n"
+                    "4. Click **Deploy**. It's live in under a minute."
+                )
+                
         except Exception as e:
             status_box.error(f"Archiving failed: {e}")
         finally:
