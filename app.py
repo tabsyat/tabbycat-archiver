@@ -114,6 +114,6 @@ if submitted:
 
 st.divider()
 st.caption(
-    "Note: on hosts with ephemeral disks (like Render's free tier), generated zip "
-    "files don't survive a restart — download it right after it's generated."
+    "Note: Download button will disappear after clicking it once."
+    "Rerun the worker to generate the file again."
 )
