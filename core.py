@@ -1,41 +1,15 @@
 """
 core.py — ported, unchanged-in-logic version of the Tabbycat Static Archive
-Colab notebook, plus fixes for missing /results/ index page and bracket pages.
-app.py (Streamlit) imports this and calls run_archive_async().
+Colab notebook. app.py (Streamlit) imports this and calls run_archive().
 
-Changes from the original notebook port:
+Every function here does exactly what its notebook-cell counterpart did.
+The only real changes from the notebook:
   - global variables -> an ArchiveConfig object passed around explicitly
   - print(...) -> a `log(...)` callback so the UI can show progress
   - the notebook's one hardcoded BASE_URL/SLUG/ROUNDS -> constructor args
-  - normalize_base_url() strips a trailing slash if present, so the app
-    accepts the URL with or without one.
-
-Changes for this round of fixes:
-  - django_pages now includes the /results/ index page itself (previously
-    only /results/round/N/ pages were mirrored, so the "Results" nav link
-    on the homepage 404'd in the static export).
-  - discover_tab_pages() now also picks up /break/ links from the homepage
-    nav, not just /tab/ links, so break-category pages get discovered the
-    same way tab pages do.
-  - mirror_extra_pages() is now mirror_extra_pages_async(): the same
-    iterative link-discovery loop as before (it keeps scanning until no new
-    internal links turn up), but any discovered /break/bracket/<category>/
-    URL is rendered through Playwright instead of being flat-fetched with
-    requests, since bracket pages are Vue-rendered and need JS to populate.
-    This works for however many break categories a tournament has defined
-    (Open, Novice, ESL, EFL, or any custom category slug) since the pattern
-    match is on the URL shape, not a hardcoded category name.
-  - snapshot_vue_page() now also runs hover-tooltip capture on bracket
-    pages. This is a preemptive addition: Calico doesn't have hoverable
-    bracket tooltips as of writing, but a PR for this has been merged
-    upstream on Tabbycat's dev branch. capture_hover_d3_tooltips() already
-    no-ops safely when there are no .hoverable elements on the page, so
-    this starts working automatically once the feature ships to Calico,
-    with no further changes required here.
-  - Orchestration now opens a single Playwright browser/page for the whole
-    run, since both tab-page rendering and the extra-page discovery loop
-    need to drive Playwright, and reusing one page is cheaper than
-    launching a browser per phase.
+  - normalize_base_url() is new: strips a trailing slash if present, so
+    the app accepts the URL with or without one (the notebook only ever
+    accepted it without).
 """
 
 import re
@@ -102,16 +76,14 @@ def build_django_pages(cfg: ArchiveConfig):
     TOURN_URL = cfg.tourn_url
     django_pages = {
         f"{TOURN_URL}/": OUT / "index.html",
-        # Results index page -- links to every round's results page (which
-        # is discovered separately via the homepage nav / rounds loop below)
-        # but was previously never fetched itself, causing a 404 in the
-        # static export when following the "Results" nav link.
-        f"{TOURN_URL}/results/": OUT / "results" / "index.html",
         f"{TOURN_URL}/motions/": OUT / "motions" / "index.html",
         f"{TOURN_URL}/motions/statistics/": OUT / "motions" / "statistics" / "index.html",
         f"{TOURN_URL}/feedback/progress/": OUT / "feedback" / "progress" / "index.html",
         f"{TOURN_URL}/participants/list/": OUT / "participants" / "list" / "index.html",
         f"{TOURN_URL}/participants/institutions/": OUT / "participants" / "institutions" / "index.html",
+        # The Results index page lists links to every round's results and is
+        # itself a plain Django page, distinct from the per-round pages below.
+        f"{TOURN_URL}/results/": OUT / "results" / "index.html",
         # Pre-Allocated Sides, Check-Ins, and Schedule are all optional Tabbycat
         # features -- most tournaments don't enable them, so these fail
         # gracefully (fetch_and_save logs FAILED and moves on) for any
@@ -140,12 +112,6 @@ def mirror_django_pages(cfg: ArchiveConfig, log=_noop_log):
 # --------------------------------------------------------------------------
 
 def discover_tab_pages(cfg: ArchiveConfig):
-    """Scan the homepage nav for /tab/ links (team/speaker/adjudicator tabs
-    etc.) AND /break/ links (break category pages, which is where bracket
-    pages are reachable from). Previously this only looked for /tab/, which
-    meant break-category pages were only ever picked up incidentally via
-    mirror_extra_pages's flat requests-based fetch -- fine for the plain
-    break list, but not for the Vue-rendered bracket page nested under it."""
     OUT = cfg.out
     TOURN_URL = cfg.tourn_url
     BASE_URL = cfg.base_url
@@ -154,11 +120,10 @@ def discover_tab_pages(cfg: ArchiveConfig):
         return {}
     soup = BeautifulSoup(homepage_path.read_text(encoding="utf-8"), "html.parser")
     discovered = {}
-    prefixes = (f"{TOURN_URL}/tab/", f"{TOURN_URL}/break/")
     for a in soup.find_all("a", href=True):
         href = a["href"]
         full_url = urljoin(BASE_URL, href)
-        if not full_url.startswith(prefixes):
+        if not full_url.startswith(TOURN_URL + "/tab/"):
             continue
         path_part = full_url[len(TOURN_URL):].strip("/")
         if not path_part:
@@ -169,11 +134,41 @@ def discover_tab_pages(cfg: ArchiveConfig):
     return discovered
 
 
+def discover_break_category_slugs(cfg: ArchiveConfig, log=_noop_log):
+    """Break categories (Open, Novice, etc.) are discovered straight from the
+    homepage's own nav links to /break/<slug>/ -- the same way tab pages are
+    discovered from its /tab/ links. This works for however many break
+    categories a tournament has, without hardcoding category names."""
+    OUT = cfg.out
+    TOURN_URL = cfg.tourn_url
+    BASE_URL = cfg.base_url
+    homepage_path = OUT / "index.html"
+    if not homepage_path.exists():
+        return []
+    soup = BeautifulSoup(homepage_path.read_text(encoding="utf-8"), "html.parser")
+    needle = f"{TOURN_URL}/break/"
+    slugs = set()
+    for a in soup.find_all("a", href=True):
+        full_url = urljoin(BASE_URL, a["href"])
+        if not full_url.startswith(needle):
+            continue
+        path_part = full_url[len(needle):].strip("/")
+        # Only take direct /break/<slug>/ links -- skip anything nested
+        # deeper (e.g. an eligibility sub-page), and skip "bracket" itself
+        # since that's the bracket-view path segment, not a category.
+        if not path_part or "/" in path_part or path_part == "bracket":
+            continue
+        slugs.add(path_part)
+    if slugs:
+        log(f"Discovered {len(slugs)} break categor{'y' if len(slugs) == 1 else 'ies'} from homepage nav: {', '.join(sorted(slugs))}")
+    return sorted(slugs)
+
+
 def build_vue_pages(cfg: ArchiveConfig, log=_noop_log):
     OUT = cfg.out
     TOURN_URL = cfg.tourn_url
     vue_pages = discover_tab_pages(cfg)
-    log(f"Discovered {len(vue_pages)} tab/break page(s) from homepage nav:")
+    log(f"Discovered {len(vue_pages)} tab page(s) from homepage nav:")
     for u in vue_pages:
         log(f"    {u}")
 
@@ -189,6 +184,16 @@ def build_vue_pages(cfg: ArchiveConfig, log=_noop_log):
         if _url not in vue_pages:
             log(f"    (fallback) adding {_url} -- not found via nav discovery")
             vue_pages[_url] = _path
+
+    # Elimination bracket pages (one per break category) are Vue-rendered,
+    # same as tab pages, so they ride along in the same Playwright pass. A
+    # plain snapshot is all that's needed here -- no hover/tooltip capture,
+    # since the bracket's clickable links aren't something we need to
+    # preserve, just its visual layout.
+    for slug in discover_break_category_slugs(cfg, log=log):
+        bracket_url = f"{TOURN_URL}/break/bracket/{slug}/"
+        vue_pages[bracket_url] = OUT / "break" / "bracket" / slug / "index.html"
+
     return vue_pages
 
 
@@ -356,52 +361,43 @@ async def snapshot_vue_page(page, url, log=_noop_log):
 
     if "/tab/diversity" in url:
         await capture_diversity_tooltips_from_data(page, log=log)
-    elif "/break/bracket/" in url:
-        # Preemptive: bracket-page hover tooltips aren't on Calico yet as of
-        # writing, but a PR for this has been merged upstream on Tabbycat's
-        # dev branch. capture_hover_d3_tooltips() already no-ops safely if
-        # there are no .hoverable elements on the page, so this starts
-        # working automatically once the feature ships, with no further
-        # changes required here.
-        log("    checking for bracket hover tooltips (pre-emptive, no-ops if not yet supported by this Tabbycat instance)...")
-        await capture_hover_d3_tooltips(page, log=log)
     else:
         log("    skipping hover capture -- popovers on this page are pre-rendered by Vue (see shim), no active capture needed")
 
     return await page.content()
 
 
-async def run_vue_capture(page, vue_pages: dict, log=_noop_log) -> dict:
-    """Render + snapshot every url -> out_path pair in vue_pages using the
-    given (already-open) Playwright page. Returns {url: html}."""
+async def run_vue_capture(vue_pages, log=_noop_log):
     results = {}
-    for url, out_path in vue_pages.items():
-        log(f"Rendering {url}")
-        html = await snapshot_vue_page(page, url, log=log)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(html, encoding="utf-8")
-        results[url] = html
-        log(f"  saved -> {out_path}")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        for url, out_path in vue_pages.items():
+            log(f"Rendering {url}")
+            html = await snapshot_vue_page(page, url, log=log)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(html, encoding="utf-8")
+            results[url] = html
+            log(f"  saved -> {out_path}")
+        await browser.close()
     return results
 
 
+async def mirror_vue_pages(cfg: ArchiveConfig, log=_noop_log):
+    vue_pages = build_vue_pages(cfg, log=log)
+    vue_html_by_url = await run_vue_capture(vue_pages, log=log)
+    return vue_pages, vue_html_by_url
+
+
 # --------------------------------------------------------------------------
-# Step 3 — Discover + mirror participant records, ballots, break, and
-# bracket pages
+# Step 3 — Discover + mirror participant records, ballots, and break pages
 # --------------------------------------------------------------------------
 
 EXTRA_PAGE_PATTERNS = [
     re.compile(r"/participants/(team|speaker|adjudicator)/\d+/"),
     re.compile(r"/results/debate/\d+/scoresheets/"),
-    re.compile(r"/break/[\w/-]+/"),  # also matches /break/bracket/<category>/
+    re.compile(r"/break/[\w/-]+/"),
 ]
-
-# Matches /break/bracket/<any-category-slug>/ specifically, so those links
-# get routed through Playwright instead of a flat requests fetch. Matches
-# any category name -- Open, Novice, ESL, EFL, or any custom category a
-# tournament has defined -- since it's matching on URL shape, not a
-# hardcoded list of category names.
-BRACKET_PATTERN = re.compile(r"/break/bracket/[\w-]+/")
 
 
 def find_extra_links(html: str) -> set:
@@ -433,20 +429,7 @@ def find_extra_links(html: str) -> set:
     return found
 
 
-async def mirror_extra_pages_async(cfg: ArchiveConfig, vue_html_by_url: dict, page, log=_noop_log):
-    """Same iterative discovery loop as the original mirror_extra_pages: keep
-    re-scanning every rendered Vue page and every HTML file saved so far for
-    new internal links matching EXTRA_PAGE_PATTERNS, until a pass turns up
-    nothing new. The only behavioural change is that any discovered
-    /break/bracket/<category>/ link is rendered through Playwright (since
-    bracket pages are Vue-rendered and need JS to populate) instead of being
-    flat-fetched with requests like participant/ballot pages are. Because
-    this reuses the same "keep looping until stable" discovery loop, it
-    doesn't matter how many clicks deep a bracket link is nested (e.g.
-    homepage -> /break/<category>/ -> /break/bracket/<category>/) or how
-    many break categories a tournament has -- every pass re-scans everything
-    fetched so far, including newly-written bracket HTML, so nothing is
-    missed regardless of nesting depth or category count."""
+def mirror_extra_pages(cfg: ArchiveConfig, vue_html_by_url, log=_noop_log):
     OUT = cfg.out
     TOURN_URL = cfg.tourn_url
 
@@ -471,20 +454,7 @@ async def mirror_extra_pages_async(cfg: ArchiveConfig, vue_html_by_url: dict, pa
 
         log(f"Pass {round_num}: {len(new_paths)} new pages discovered")
         for path in sorted(new_paths):
-            out_path = extra_page_out_path(path)
-            if BRACKET_PATTERN.search(path):
-                url = f"{TOURN_URL}{path}"
-                log(f"  bracket page detected, rendering via Playwright: {url}")
-                html = await snapshot_vue_page(page, url, log=log)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(html, encoding="utf-8")
-                # Feed the rendered bracket HTML back into the pool that
-                # gets scanned on the next pass, in case a bracket page
-                # itself links to anything else worth mirroring.
-                vue_html_by_url[url] = html
-                log(f"  saved -> {out_path}")
-            else:
-                fetch_and_save(f"{TOURN_URL}{path}", out_path, log=log)
+            fetch_and_save(f"{TOURN_URL}{path}", extra_page_out_path(path), log=log)
             fetched_paths.add(path)
 
     log(f"Total extra pages mirrored: {len(fetched_paths)}")
@@ -851,20 +821,9 @@ async def run_archive_async(base_url, slug, num_rounds, out_dir, zip_base_path, 
 
     mirror_django_pages(cfg, log=log)
 
-    # Single Playwright browser/page for the whole run: both tab-page
-    # rendering and the extra-page discovery loop (which now also renders
-    # bracket pages) need a live page, so one is opened here and shared
-    # rather than launching a separate browser per phase.
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
+    vue_pages, vue_html_by_url = await mirror_vue_pages(cfg, log=log)
 
-        vue_pages = build_vue_pages(cfg, log=log)
-        vue_html_by_url = await run_vue_capture(page, vue_pages, log=log)
-
-        await mirror_extra_pages_async(cfg, vue_html_by_url, page, log=log)
-
-        await browser.close()
+    mirror_extra_pages(cfg, vue_html_by_url, log=log)
 
     ctx = make_rewrite_context(cfg)
     rewrite_all_html(cfg, ctx, log=log)
