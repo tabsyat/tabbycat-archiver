@@ -569,7 +569,7 @@ def rewrite_html_file(html_path: Path, cfg: ArchiveConfig, ctx, log=_noop_log):
     if is_prerendered:
         vue_mount["id"] = "vueMount-disabled"
     else:
-        vue_data_link_re = re.compile(r'("link"\s*:\s*")([^"]*)(")')
+        vue_data_link_re = re.compile(r'("(?:link|url)"\s*:\s*")([^"]*)(")')
         for script in soup.find_all("script"):
             if script.string and "window.vueData" in script.string:
                 def _sub(m):
